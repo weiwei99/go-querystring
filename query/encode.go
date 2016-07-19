@@ -21,7 +21,6 @@
 package query
 
 import (
-	"bytes"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -124,12 +123,93 @@ func Values(v interface{}) (url.Values, error) {
 		return values, nil
 	}
 
-	if val.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("query: Values() expects struct input. Got %v", val.Kind())
+	switch val.Kind() {
+	case reflect.Struct, reflect.Map, reflect.Array, reflect.Slice:
+		err := reflectCompositeValue(values, val, "")
+		return values, err
+	default:
+		return nil, fmt.Errorf("query: Values() unexpected input. Got %v", val.Kind())
+	}
+}
+
+func reflectCompositeValue(values url.Values, val reflect.Value, scope string) error {
+	switch val.Kind() {
+	case reflect.Struct:
+		return reflectValue(values, val, scope)
+	case reflect.Map:
+		return reflectMapValue(values, val, scope)
+	case reflect.Array, reflect.Slice:
+		return reflectArrayValue(values, val, scope)
+	default:
+		return fmt.Errorf("query: Values() unexpected input. Got %v", val.Kind())
 	}
 
-	err := reflectValue(values, val, "")
-	return values, err
+	return nil
+}
+
+func reflectMapValue(values url.Values, val reflect.Value, scope string) error {
+	mapKeys := val.MapKeys()
+
+	for _, key := range mapKeys {
+		name := key.String()
+		if scope != "" {
+			name = scope + "[" + name + "]"
+		}
+
+		sv := val.MapIndex(key)
+
+		if sv.Kind() == reflect.Ptr || sv.Kind() == reflect.Interface {
+			if sv.IsNil() {
+				continue
+			}
+		}
+
+		for sv.Kind() == reflect.Ptr || sv.Kind() == reflect.Interface {
+			if sv.IsNil() {
+				break
+			}
+			sv = sv.Elem()
+		}
+
+		switch sv.Kind() {
+		case reflect.Slice, reflect.Array, reflect.Map, reflect.Struct:
+			reflectCompositeValue(values, sv, name)
+		default:
+			values.Add(name, valueString(sv, tagOptions{}))
+		}
+	}
+
+	return nil
+}
+
+// 数组类型
+func reflectArrayValue(values url.Values, val reflect.Value, scope string) error {
+	l := val.Len()
+
+	for i := 0; i < l; i++ {
+		name := strconv.Itoa(i)
+		if scope != "" {
+			name = scope + "[" + name + "]"
+		}
+
+		sv := val.Index(i)
+
+		if sv.Kind() == reflect.Ptr || sv.Kind() == reflect.Interface {
+			if sv.IsNil() {
+				break
+			}
+			sv = sv.Elem()
+		}
+
+		switch sv.Kind() {
+		case reflect.Slice, reflect.Array, reflect.Map, reflect.Struct:
+			reflectCompositeValue(values, sv, name)
+		default:
+			values.Add(name, valueString(sv, tagOptions{}))
+		}
+	}
+
+	return nil
 }
 
 // reflectValue populates the values parameter from the struct fields in val.
@@ -181,56 +261,15 @@ func reflectValue(values url.Values, val reflect.Value, scope string) error {
 			continue
 		}
 
-		if sv.Kind() == reflect.Slice || sv.Kind() == reflect.Array {
-			var del byte
-			if opts.Contains("comma") {
-				del = ','
-			} else if opts.Contains("space") {
-				del = ' '
-			} else if opts.Contains("semicolon") {
-				del = ';'
-			} else if opts.Contains("brackets") {
-				name = name + "[]"
-			}
-
-			if del != 0 {
-				s := new(bytes.Buffer)
-				first := true
-				for i := 0; i < sv.Len(); i++ {
-					if first {
-						first = false
-					} else {
-						s.WriteByte(del)
-					}
-					s.WriteString(valueString(sv.Index(i), opts))
-				}
-				values.Add(name, s.String())
-			} else {
-				for i := 0; i < sv.Len(); i++ {
-					k := name
-					if opts.Contains("numbered") {
-						k = fmt.Sprintf("%s%d", name, i)
-					}
-					values.Add(k, valueString(sv.Index(i), opts))
-				}
-			}
-			continue
-		}
-
-		if sv.Type() == timeType {
-			values.Add(name, valueString(sv, opts))
-			continue
-		}
-
-		for sv.Kind() == reflect.Ptr {
+		for sv.Kind() == reflect.Ptr || sv.Kind() == reflect.Interface {
 			if sv.IsNil() {
 				break
 			}
 			sv = sv.Elem()
 		}
 
-		if sv.Kind() == reflect.Struct {
-			reflectValue(values, sv, name)
+		if sv.Kind() == reflect.Slice || sv.Kind() == reflect.Array || sv.Kind() == reflect.Map || sv.Kind() == reflect.Struct {
+			reflectCompositeValue(values, sv, name)
 			continue
 		}
 
